@@ -1,0 +1,5 @@
+#!/bin/bash
+printf '%s\n' "$@" >> "$FAKE_DOCKER_ARGS"
+[ "$1" = pull ] && exit "${FAKE_PULL_RC:-0}"
+echo "1 commits scanned."
+exit "${FAKE_DOCKER_RC:-0}"

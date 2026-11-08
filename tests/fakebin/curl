@@ -1,0 +1,5 @@
+#!/bin/bash
+printf '%s\n' "$@" > "$FAKE_CURL_ARGS"
+[ "${FAKE_CURL_RC:-0}" = 0 ] || exit "$FAKE_CURL_RC"
+[ "$1" = -fsSL ] && [ "$2" = --proto ] && [ "$3" = "=https" ] && [ "$4" = --retry ] && [ "$6" = -o ] || exit 90
+cp "$FAKE_ARCHIVE" "$7"

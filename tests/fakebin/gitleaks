@@ -1,0 +1,10 @@
+#!/bin/bash
+printf '%s\n' "$@" >> "$FAKE_GITLEAKS_ARGS"
+if [ -n "${FAKE_ENV_OUTPUT:-}" ]; then
+  env > "$FAKE_ENV_OUTPUT"
+fi
+[ -z "${FAKE_GIT_ERROR:-}" ] || echo "$FAKE_GIT_ERROR"
+if [ "${FAKE_NO_COUNT:-0}" != 1 ]; then
+  echo "${FAKE_SCANNED:-1} commits scanned."
+fi
+exit "${FAKE_GITLEAKS_RC:-0}"
