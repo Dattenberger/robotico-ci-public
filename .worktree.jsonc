@@ -1,0 +1,4 @@
+// Worktree contract (robotico-dev create-worktree / cleanup-worktrees).
+{
+  "integrationBranch": "main"
+}
