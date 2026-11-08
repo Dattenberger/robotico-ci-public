@@ -1,0 +1,18 @@
+# Reuse the CI pool's pinned binary, or install the verified release on a Linux x64 runner.
+# Keep the pin parser aligned with dev-hooks' byte copy; never evaluate the pin as shell.
+# @see contract/gitleaks-merges/README.md, README.md
+name: gitleaks-pinned
+description: Put the pinned gitleaks binary on PATH (Linux x64 only).
+
+outputs:
+  path:
+    description: Absolute path to the pinned gitleaks binary
+    value: ${{ steps.install.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Locate or install pinned gitleaks
+      id: install
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/install.sh"

@@ -1,0 +1,10 @@
+# gitleaks configuration: the single source for the pre-commit hook
+# (scripts/hooks/gitleaks.sh, passed via --config) and the CI job
+# (.github/workflows/secrets.yml).
+#
+# Extends the built-in ruleset, never replaces it. Every future allowlist entry
+# must be reviewed individually, anchored to the specific benign value (not a
+# whole file) and carry a comment saying why it is not a secret.
+
+[extend]
+useDefault = true

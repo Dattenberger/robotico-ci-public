@@ -1,0 +1,221 @@
+"""Public workflow and action contracts, ported from robotico-ci/tests/test_gitleaks_merges.py.
+
+Workflow and action YAML uses the same safe loader as the source repository; shell tests run offline.
+@see README.md, tests/test_gitleaks_merges.py
+"""
+
+import hashlib
+import json
+import os
+import stat
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+from tests import yamlsafe
+from tests.test_gitleaks_merges import ROOT, load, step_named
+
+CONTRACT = ROOT / 'contract/gitleaks-merges'
+CHECKOUT = 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262'
+RUNNER = "${{ vars.CI_RUNS_ON_S || 'ubuntu-latest' }}"
+
+
+class Copy(unittest.TestCase):
+    def test_the_copy_matches_its_source_json(self) -> None:
+        source = json.loads((CONTRACT / 'SOURCE.json').read_text())
+        self.assertEqual(source['repo'], 'Dattenberger/robotico-packages')
+        self.assertEqual(source['path'], 'packages/dev-hooks/checks/gitleaks-merges.sh')
+        self.assertRegex(source['commit'], r'^[0-9a-f]{40}$')
+        self.assertEqual(source['tag'], 'pending')
+        self.assertEqual(list(source['files']), ['gitleaks-merges.sh', 'gitleaks.pin'])
+        for name, digest in source['files'].items():
+            self.assertEqual(digest, hashlib.sha256((CONTRACT / name).read_bytes()).hexdigest())
+
+    def test_the_pin_has_the_three_strict_values(self) -> None:
+        values = dict(line.split('=', 1) for line in (CONTRACT / 'gitleaks.pin').read_text().splitlines()
+                      if line and not line.startswith('#'))
+        self.assertEqual(set(values), {'version', 'image', 'linux_x64_sha256'})
+        self.assertRegex(values['version'], r'^[0-9]+\.[0-9]+\.[0-9]+$')
+        self.assertRegex(values['image'], r'^[a-z0-9./-]+@sha256:[0-9a-f]{64}$')
+        self.assertRegex(values['linux_x64_sha256'], r'^[0-9a-f]{64}$')
+
+    def test_the_copy_and_shared_scripts_have_the_right_modes(self) -> None:
+        for name, mode in (('contract/gitleaks-merges/gitleaks-merges.sh', 0o755),
+                           ('contract/gitleaks-merges/gitleaks.pin', 0o644),
+                           ('actions/gitleaks-pinned/install.sh', 0o755),
+                           ('actions/gitleaks-merges/run.sh', 0o755)):
+            path = ROOT / name
+            self.assertEqual(bool(path.stat().st_mode & stat.S_IXUSR), mode == 0o755)
+            entry = subprocess.run(['git', '--no-optional-locks', '-C', str(ROOT), 'ls-files', '-s', '--', name],
+                                   capture_output=True, text=True, check=True).stdout
+            # New files have no index entry until the orchestrator stages them. Check it whenever present.
+            if entry:
+                self.assertTrue(entry.startswith(f'100{mode:o} '), entry)
+
+    def test_only_the_shared_merge_runner_calls_the_contract(self) -> None:
+        callers = [path.relative_to(ROOT).as_posix() for folder in ('.github', 'actions')
+                   for path in (ROOT / folder).rglob('*')
+                   if path.is_file() and 'gitleaks-merges.sh' in path.read_text()]
+        self.assertEqual(callers, ['actions/gitleaks-merges/run.sh'])
+
+
+class Composites(unittest.TestCase):
+    def test_standalone_merges_preserves_its_interface_and_uses_env_only(self) -> None:
+        action = load(ROOT / 'actions/gitleaks-merges/action.yml')
+        self.assertEqual(set(action['inputs']), {'image', 'binary'})
+        for name in ('image', 'binary'):
+            self.assertEqual(action['inputs'][name]['required'], False)
+            self.assertEqual(action['inputs'][name]['default'], '')
+        self.assertEqual(action['runs']['using'], 'composite')
+        (step,) = action['runs']['steps']
+        self.assertEqual(step['env'], {'RCI_IMAGE': '${{ inputs.image }}', 'RCI_BINARY': '${{ inputs.binary }}'})
+        self.assertEqual(step['shell'], 'bash')
+        self.assertEqual(step['run'], 'bash "$GITHUB_ACTION_PATH/run.sh"')
+        script = (ROOT / 'actions/gitleaks-merges/run.sh').read_text()
+        self.assertNotIn('${{', script)
+        self.assertIn('docker pull -q "$RCI_IMAGE"', script)
+        self.assertRegex(script, r'\n  0\) ;;\n')
+        self.assertRegex(script, r'\n  \*\).*exit 1 ;;\n')
+
+    def test_pinned_has_no_inputs_and_exposes_the_shared_installer_output(self) -> None:
+        action = load(ROOT / 'actions/gitleaks-pinned/action.yml')
+        self.assertNotIn('inputs', action)
+        self.assertEqual(action['outputs']['path']['value'], '${{ steps.install.outputs.path }}')
+        self.assertEqual(action['runs']['using'], 'composite')
+        (step,) = action['runs']['steps']
+        self.assertEqual(step['id'], 'install')
+        self.assertEqual(step['shell'], 'bash')
+        self.assertEqual(step['run'], 'bash "$GITHUB_ACTION_PATH/install.sh"')
+        script = (ROOT / 'actions/gitleaks-pinned/install.sh').read_text()
+        self.assertIn('${BASH_SOURCE[0]}', script)
+        self.assertNotIn('GITHUB_ACTION_PATH', script)
+
+    def test_scan_inputs_steps_and_shared_scripts(self) -> None:
+        action = load(ROOT / 'actions/gitleaks-scan/action.yml')
+        self.assertEqual(set(action['inputs']), {'range', 'config'})
+        for name in ('range', 'config'):
+            self.assertEqual(action['inputs'][name]['required'], False)
+            self.assertEqual(action['inputs'][name]['default'], '')
+        self.assertEqual(action['runs']['using'], 'composite')
+        install, history, merges = action['runs']['steps']
+        self.assertEqual(install, {'name': 'Locate or install pinned gitleaks', 'id': 'gitleaks', 'shell': 'bash',
+                                  'run': 'bash "$GITHUB_ACTION_PATH/../gitleaks-pinned/install.sh"'})
+        self.assertEqual(history['name'], 'gitleaks (history)')
+        self.assertEqual(history['shell'], 'bash')
+        self.assertEqual(history['env'], {'RCI_BINARY': '${{ steps.gitleaks.outputs.path }}',
+                                         'RCI_RANGE': '${{ inputs.range }}', 'RCI_CONFIG': '${{ inputs.config }}'})
+        self.assertEqual(merges, {'name': "gitleaks over the merges' own content", 'shell': 'bash',
+                                 'env': {'RCI_IMAGE': '', 'RCI_BINARY': '${{ steps.gitleaks.outputs.path }}',
+                                         'RCI_RANGE': '${{ inputs.range }}'},
+                                 'run': 'bash "$GITHUB_ACTION_PATH/../gitleaks-merges/run.sh" "$RCI_RANGE"'})
+        for step in (install, history, merges):
+            self.assertNotIn('uses', step)
+            self.assertNotIn('${{', step['run'])
+        self.assertIn('GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1', history['run'])
+        self.assertIn('--root --full-history --all --no-textconv --no-ext-diff', history['run'])
+        self.assertLess(history['run'].index('stderr is not empty'), history['run'].index('case $rc in'))
+        self.assertNotIn('docker', json.dumps(action))
+
+
+class WorkflowShape(unittest.TestCase):
+    def test_required_workflow_triggers_permissions_and_runner(self) -> None:
+        doc = load(ROOT / '.github/workflows/secret-scan.yml')
+        self.assertEqual(set(doc), {'name', 'on', 'permissions', 'jobs'})
+        self.assertEqual(doc['name'], 'secret-scan')
+        self.assertEqual(doc['on'], {'pull_request': {'types': ['opened', 'synchronize', 'reopened', 'edited']}, 'workflow_call': {'inputs': {
+            'history': {'description': 'History to scan: full or pr (pr requires a pull_request event)',
+                        'type': 'string', 'default': 'full'}}}})
+        self.assertEqual(doc['permissions'], {'contents': 'read'})
+        self.assertEqual(set(doc['jobs']), {'gitleaks'})
+        job = doc['jobs']['gitleaks']
+        self.assertEqual(set(job), {'runs-on', 'steps'})
+        self.assertEqual(job['runs-on'], RUNNER)
+
+    def test_checkout_is_pinned_and_scan_uses_the_public_remote_action(self) -> None:
+        checkout, select, scan = load(ROOT / '.github/workflows/secret-scan.yml')['jobs']['gitleaks']['steps']
+        self.assertEqual(checkout, {'uses': CHECKOUT, 'with': {'fetch-depth': 0, 'persist-credentials': False}})
+        self.assertEqual(select['id'], 'history')
+        self.assertEqual(select['shell'], 'bash')
+        self.assertEqual(select['env'], {'RCI_HISTORY': '${{ inputs.history }}',
+                                         'RCI_EVENT': '${{ github.event_name }}',
+                                         'RCI_BASE': '${{ github.event.pull_request.base.sha }}',
+                                         'RCI_HEAD': '${{ github.event.pull_request.head.sha }}'})
+        self.assertNotIn('${{', select['run'])
+        self.assertEqual(scan, {'uses': 'Dattenberger/robotico-ci-public/actions/gitleaks-scan@v1',
+                                'with': {'range': '${{ steps.history.outputs.range }}'}})
+
+    def test_ci_tests_the_local_tree_with_one_required_job(self) -> None:
+        doc = load(ROOT / '.github/workflows/ci.yml')
+        self.assertEqual(doc['on'], {'pull_request': None, 'push': {'branches': ['main']}})
+        self.assertEqual(doc['permissions'], {'contents': 'read'})
+        self.assertEqual(set(doc['jobs']), {'ci'})
+        job = doc['jobs']['ci']
+        self.assertEqual(set(job), {'runs-on', 'steps'})
+        self.assertEqual(job['runs-on'], RUNNER)
+        checkout, tests, scan = job['steps']
+        self.assertEqual(checkout, {'uses': CHECKOUT, 'with': {'fetch-depth': 0, 'persist-credentials': False}})
+        self.assertEqual(tests, {'name': 'Unit tests', 'run': 'python3 -m unittest discover -s tests -t .'})
+        self.assertEqual(scan, {'uses': './actions/gitleaks-scan'})
+
+
+class SelectHistory(unittest.TestCase):
+    def select(self, history: str, event: str, base: str = 'a' * 40, head: str = 'b' * 40) -> tuple:
+        with tempfile.TemporaryDirectory(prefix='rci-select-history-') as tmp:
+            output = Path(tmp) / 'output'
+            env = dict(os.environ, RCI_HISTORY=history, RCI_EVENT=event, RCI_BASE=base, RCI_HEAD=head,
+                       GITHUB_OUTPUT=str(output))
+            steps = load(ROOT / '.github/workflows/secret-scan.yml')['jobs']['gitleaks']['steps']
+            script = step_named(steps, 'Select history')['run']
+            result = subprocess.run(['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script],
+                                    cwd=tmp, env=env, capture_output=True, text=True)
+            return result, output.read_text() if output.exists() else ''
+
+    def test_direct_and_called_pr_modes_select_the_pr_shas(self) -> None:
+        for history in ('', 'pr'):
+            with self.subTest(history=history):
+                result, output = self.select(history, 'pull_request')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output, f"range={'a' * 40}..{'b' * 40}\n")
+
+    def test_full_history_calls_scan_all_history_on_any_event(self) -> None:
+        for event in ('push', 'schedule', 'pull_request', 'workflow_dispatch'):
+            with self.subTest(event=event):
+                result, output = self.select('full', event)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output, 'range=\n')
+
+    def test_pr_mode_requires_a_pr_event(self) -> None:
+        for history in ('', 'pr'):
+            for event in ('push', 'schedule', 'workflow_dispatch'):
+                with self.subTest(history=history, event=event):
+                    result, output = self.select(history, event)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn('::error::history: pr requires a pull_request event', result.stdout)
+                    self.assertEqual(output, '')
+
+    def test_invalid_history_or_missing_pr_shas_fails(self) -> None:
+        result, output = self.select('invalid', 'pull_request')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(output, '')
+        for base, head in (('', ''), ('main', 'HEAD'), ('a' * 40, '$(touch injected)'),
+                           ('a' * 40, 'B' * 40), ('a' * 40, 'b' * 40 + '\n')):
+            with self.subTest(base=base, head=head):
+                result, output = self.select('pr', 'pull_request', base, head)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('::error::invalid pull request commit SHAs', result.stdout)
+                self.assertEqual(output, '')
+
+
+class YamlsafeTest(unittest.TestCase):
+    """Copied with the loader from robotico-ci/tests/test_release_contracts.py."""
+
+    def test_loads_a_mapping_with_string_keys(self) -> None:
+        self.assertEqual({"on": "push", "jobs": {"true": 1}}, yamlsafe.load("on: push\njobs:\n  true: 1\n"))
+
+    def test_refuses(self) -> None:
+        for label, text in {"duplicate": "a: 1\na: 2\n", "nested duplicate": "a:\n  b: 1\n  b: 2\n", "list root": "- a\n",
+                            "empty": "", "scalar": "x", "anchor": "a: &x 1\nb: *x\n", "broken": "a: [\n"}.items():
+            with self.subTest(label):
+                with self.assertRaises(yamlsafe.YamlError):
+                    yamlsafe.load(text)

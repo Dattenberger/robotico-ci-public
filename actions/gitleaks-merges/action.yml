@@ -1,0 +1,28 @@
+# Scans every reachable merge's own content with the caller's .gitleaks.toml and dev-hooks' byte copy.
+# Exactly one runner is required: the pinned binary path or the pinned image (pulled here). Inputs reach the
+# script only through env. The caller checks out with fetch-depth 0; shallow history, grafts and git-dir
+# symlinks are refused as no verdict, and replace refs are ignored for either runner.
+# GitHub runs this shell with -e, so the scan's exit is read with errexit off.
+# @see contract/gitleaks-merges/README.md, README.md
+name: gitleaks-merges
+description: gitleaks over the content each merge commit brings itself (exit 1 finding, any other non-zero no verdict).
+
+inputs:
+  image:
+    description: "The gitleaks image, by digest (the one the full-history scan uses)"
+    required: false
+    default: ""
+  binary:
+    description: "Path to the pinned gitleaks binary (exclusive with image)"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: gitleaks over the merges' own content
+      shell: bash
+      env:
+        RCI_IMAGE: ${{ inputs.image }}
+        RCI_BINARY: ${{ inputs.binary }}
+      run: bash "$GITHUB_ACTION_PATH/run.sh"

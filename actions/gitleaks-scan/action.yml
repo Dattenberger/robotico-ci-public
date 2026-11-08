@@ -1,0 +1,91 @@
+# Both scans share the pinned installer and merge runner without a nested action reference.
+# Paths resolve in this action's repository, while the scans run on the caller's checkout.
+# Known limit: config applies to history only. The byte-copied merge scanner uses the target's .gitleaks.toml
+# (or built-ins), so a target config can narrow the merge scan. The shipped history config extends built-ins only.
+# @see README.md, contract/gitleaks-merges/README.md
+name: gitleaks-scan
+description: Scan git history and merges with the pinned gitleaks binary.
+
+inputs:
+  range:
+    description: "Two lowercase 40-character commit SHAs (A..B); empty scans all history"
+    required: false
+    default: ""
+  config:
+    description: "History scan config; empty uses this action repository's .gitleaks.toml"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Locate or install pinned gitleaks
+      id: gitleaks
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/../gitleaks-pinned/install.sh"
+    # Refuse hidden history and partial scans. No repository diff driver runs; replace refs are ignored.
+    - name: gitleaks (history)
+      shell: bash
+      env:
+        RCI_BINARY: ${{ steps.gitleaks.outputs.path }}
+        RCI_RANGE: ${{ inputs.range }}
+        RCI_CONFIG: ${{ inputs.config }}
+      run: |
+        set +e -uo pipefail
+        if [ -n "$RCI_RANGE" ] && ! [[ "$RCI_RANGE" =~ ^[0-9a-f]{40}\.\.[0-9a-f]{40}$ ]]; then
+          echo "::error::invalid range - expected two lowercase 40-character commit SHAs separated by .."; exit 1
+        fi
+        cd "$GITHUB_WORKSPACE" || exit 1
+        export GIT_NO_REPLACE_OBJECTS=1
+        if [ "$(git --no-optional-locks rev-parse --is-shallow-repository 2>&1)" != false ]; then
+          echo "::error::the checkout is shallow or no git repository - the history scan has no verdict"; exit 1
+        fi
+        if [ -e "$(git --no-optional-locks rev-parse --git-path info/grafts)" ]; then
+          echo "::error::the repository has info/grafts, which hide history - the history scan has no verdict"; exit 1
+        fi
+        # A fresh checkout has no symlink in its git dir; one could point the scan at other history.
+        if [ -n "$(find "$(git --no-optional-locks rev-parse --git-dir)" "$(git --no-optional-locks rev-parse --git-common-dir)" -type l -print -quit 2>&1)" ]; then
+          echo "::error::the git directory holds a symlink - the history scan has no verdict"; exit 1
+        fi
+        revisions=(--all)
+        log_opts="--root --full-history --all --no-textconv --no-ext-diff"
+        if [ -n "$RCI_RANGE" ]; then
+          revisions=("$RCI_RANGE")
+          log_opts="--root --full-history --no-textconv --no-ext-diff $RCI_RANGE"
+        fi
+        if ! git --no-optional-locks rev-list --count "${revisions[@]}" > /dev/null; then
+          echo "::error::git could not count the selected history - no verdict"; exit 1
+        fi
+        # gitleaks counts only commits that add text lines; deletions, binaries, empty commits and merges count 0.
+        # The positive control therefore expects scanned commits only when such a commit is selected.
+        if ! textual=$(git --no-optional-locks -c core.quotePath=false log --no-merges --root --no-textconv \
+            --no-ext-diff --diff-filter=d --numstat --format=@%H "${revisions[@]}"); then
+          echo "::error::git could not read the selected history - no verdict"; exit 1
+        fi
+        expected=$(awk '/^@/ { c = $0; next } $1 != "-" && $1 > 0 { s[c] = 1 } END { print length(s) }' <<< "$textual")
+        config=${RCI_CONFIG:-$GITHUB_ACTION_PATH/../../.gitleaks.toml}
+        out=$(env -u GITLEAKS_CONFIG -u GITLEAKS_CONFIG_TOML GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+          GIT_NO_REPLACE_OBJECTS=1 "$RCI_BINARY" \
+          detect --redact --verbose --no-banner --config="$config" --exit-code=99 \
+          --log-opts="$log_opts" 2>&1)
+        rc=$?
+        printf '%s\n' "$out"
+        if grep -qE '\[git\]|stderr is not empty' <<< "$out"; then
+          echo "::error::git reported an error inside the scan - partial scan, no verdict"; exit 1
+        fi
+        scanned=$(grep -oE '[0-9]+ commits scanned' <<< "$out" | grep -oE '^[0-9]+' | tail -1)
+        if [ "$rc" = 0 ] && [ "$expected" != 0 ] && [ "${scanned:-0}" = 0 ]; then
+          echo "::error::gitleaks scanned ${scanned:-no} commits of a selection with $expected text-adding commits - no verdict"; exit 1
+        fi
+        case $rc in
+          0) ;;
+          99) echo "::error::gitleaks found potential secrets (redacted above)"; exit 1 ;;
+          *) echo "::error::gitleaks did not complete (exit $rc) - no verdict, not a clean scan"; exit 1 ;;
+        esac
+    - name: gitleaks over the merges' own content
+      shell: bash
+      env:
+        RCI_IMAGE: ""
+        RCI_BINARY: ${{ steps.gitleaks.outputs.path }}
+        RCI_RANGE: ${{ inputs.range }}
+      run: bash "$GITHUB_ACTION_PATH/../gitleaks-merges/run.sh" "$RCI_RANGE"

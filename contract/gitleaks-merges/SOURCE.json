@@ -1,0 +1,10 @@
+{
+  "repo": "Dattenberger/robotico-packages",
+  "path": "packages/dev-hooks/checks/gitleaks-merges.sh",
+  "commit": "ac803e39efd6241f374fafcc4c638dccfd99fbbf",
+  "tag": "pending",
+  "files": {
+    "gitleaks-merges.sh": "6459ebad04423ef86fbac06bdf3fa539836c1ed983d441dc609fe8cdf3c87eca",
+    "gitleaks.pin": "d7b85293dd262322a06e8e06ad1802df08f6796683881a719152d2ec74d0304c"
+  }
+}
