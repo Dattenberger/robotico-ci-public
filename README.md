@@ -29,6 +29,8 @@ jobs:
 `history` defaults to `full`. Set it to `pr` to scan the PR range in a calling workflow triggered by
 `pull_request`; other events fail with that setting. Direct PR runs of the required workflow always select the PR
 range. A reusable `history: full` call also scans all history when its caller is a PR workflow.
+The workflow fetches with plain git (all branches and tags, full history, the commit under test checked out) rather
+than `actions/checkout`, whose credential cleanup fails on a gitlink that has no `.gitmodules` entry.
 
 To use the composite directly, check out the target repository with `fetch-depth: 0` and
 `persist-credentials: false`, then call `Dattenberger/robotico-ci-public/actions/gitleaks-scan@v1`.
