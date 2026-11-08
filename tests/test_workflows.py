@@ -132,9 +132,13 @@ class WorkflowShape(unittest.TestCase):
         self.assertEqual(set(job), {'runs-on', 'steps'})
         self.assertEqual(job['runs-on'], RUNNER)
 
-    def test_checkout_is_pinned_and_scan_uses_the_public_remote_action(self) -> None:
-        checkout, select, scan = load(ROOT / '.github/workflows/secret-scan.yml')['jobs']['gitleaks']['steps']
-        self.assertEqual(checkout, {'uses': CHECKOUT, 'with': {'fetch-depth': 0, 'persist-credentials': False}})
+    def test_fetch_takes_inputs_from_env_and_scan_uses_the_public_remote_action(self) -> None:
+        fetch, select, scan = load(ROOT / '.github/workflows/secret-scan.yml')['jobs']['gitleaks']['steps']
+        self.assertEqual(fetch['name'], 'Fetch history')
+        self.assertEqual(fetch['shell'], 'bash')
+        self.assertEqual(fetch['env'], {'RCI_TOKEN': '${{ github.token }}', 'RCI_SERVER': '${{ github.server_url }}',
+                                        'RCI_REPO': '${{ github.repository }}', 'RCI_SHA': '${{ github.sha }}'})
+        self.assertNotIn('${{', fetch['run'])
         self.assertEqual(select['id'], 'history')
         self.assertEqual(select['shell'], 'bash')
         self.assertEqual(select['env'], {'RCI_HISTORY': '${{ inputs.history }}',
@@ -157,6 +161,101 @@ class WorkflowShape(unittest.TestCase):
         self.assertEqual(checkout, {'uses': CHECKOUT, 'with': {'fetch-depth': 0, 'persist-credentials': False}})
         self.assertEqual(tests, {'name': 'Unit tests', 'run': 'python3 -m unittest discover -s tests -t .'})
         self.assertEqual(scan, {'uses': './actions/gitleaks-scan'})
+
+
+class FetchHistory(unittest.TestCase):
+    """The fetch step against a local origin (file URL), offline."""
+
+    def git(self, cwd: Path, *args: str) -> str:
+        env = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t', GIT_COMMITTER_NAME='t',
+                   GIT_COMMITTER_EMAIL='t@t', GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+        return subprocess.run(['git', '-C', str(cwd), *args], env=env, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def origin(self, tmp: Path) -> tuple:
+        """owner/repo with main (a gitlink without .gitmodules), a side branch, a tag and an unreferenced commit."""
+        src = tmp / 'src'
+        src.mkdir()
+        self.git(src, 'init', '-q', '-b', 'main')
+        (src / 'a.txt').write_text('a\n')
+        self.git(src, 'add', 'a.txt')
+        self.git(src, 'commit', '-q', '-m', 'a')
+        self.git(src, 'update-index', '--add', '--cacheinfo', f"160000,{'1' * 40},vendored/tool")
+        self.git(src, 'commit', '-q', '-m', 'gitlink without .gitmodules')
+        self.git(src, 'tag', 'v0')
+        self.git(src, 'checkout', '-q', '-b', 'side')
+        (src / 'b.txt').write_text('b\n')
+        self.git(src, 'add', 'b.txt')
+        self.git(src, 'commit', '-q', '-m', 'b')
+        self.git(src, 'checkout', '-q', '--detach', 'main')
+        (src / 'c.txt').write_text('c\n')
+        self.git(src, 'add', 'c.txt')
+        self.git(src, 'commit', '-q', '-m', 'merge ref stand-in')
+        merge = self.git(src, 'rev-parse', 'HEAD')
+        self.git(src, 'checkout', '-q', 'main')
+        repo = tmp / 'owner' / 'repo.git'
+        repo.parent.mkdir()
+        self.git(tmp, 'clone', '-q', '--bare', str(src), str(repo))
+        self.git(repo, 'update-ref', 'refs/pull/1/merge', merge)
+        self.git(repo, 'config', 'uploadpack.allowAnySHA1InWant', 'true')
+        return merge
+
+    def fetch(self, tmp: Path, sha: str, workspace: Path, global_config: str = '/dev/null') -> subprocess.CompletedProcess:
+        env = dict(os.environ, RCI_TOKEN='t0ken', RCI_SERVER=f'file://{tmp}', RCI_REPO='owner/repo.git',
+                   RCI_SHA=sha, GIT_CONFIG_GLOBAL=global_config, GIT_CONFIG_NOSYSTEM='1')
+        steps = load(ROOT / '.github/workflows/secret-scan.yml')['jobs']['gitleaks']['steps']
+        script = step_named(steps, 'Fetch history')['run']
+        return subprocess.run(['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script],
+                              cwd=workspace, env=env, capture_output=True, text=True)
+
+    def test_full_history_of_a_repository_with_a_broken_gitlink(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='rci-fetch-') as raw:
+            tmp = Path(raw)
+            merge = self.origin(tmp)
+            ws = tmp / 'ws'
+            ws.mkdir()
+            result = self.fetch(tmp, merge, ws)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(self.git(ws, 'rev-parse', 'HEAD'), merge)
+            self.assertEqual(self.git(ws, 'rev-list', '--count', '--all'), '4')
+            self.assertEqual(self.git(ws, 'for-each-ref', '--format=%(refname)').split(),
+                             ['refs/remotes/origin/main', 'refs/remotes/origin/side', 'refs/remotes/rci/checkout',
+                              'refs/tags/v0'])
+            self.assertTrue((ws / 'c.txt').is_file())
+            self.assertEqual(self.git(ws, 'status', '--porcelain'), '')
+            self.assertNotIn('t0ken', (ws / '.git/config').read_text())
+            self.assertIn('::add-mask::', result.stdout)
+
+    def test_harmless_runner_http_settings_pass_the_credential_guard(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='rci-fetch-') as raw:
+            tmp = Path(raw)
+            merge = self.origin(tmp)
+            config = tmp / 'gitconfig'
+            config.write_text('[http]\n\tversion = HTTP/1.1\n\tsslCAInfo = /etc/ssl/certs/ca-certificates.crt\n')
+            ws = tmp / 'ws'
+            ws.mkdir()
+            result = self.fetch(tmp, merge, ws, str(config))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(self.git(ws, 'rev-parse', 'HEAD'), merge)
+
+    def test_refuses_an_invalid_sha_or_a_used_workspace(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='rci-fetch-') as raw:
+            tmp = Path(raw)
+            merge = self.origin(tmp)
+            for sha in ('', 'HEAD', merge.upper(), '$(touch injected)'):
+                with self.subTest(sha=sha):
+                    ws = tmp / f'ws-{abs(hash(sha))}'
+                    ws.mkdir()
+                    result = self.fetch(tmp, sha, ws)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn('::error::invalid commit SHA', result.stdout)
+                    self.assertEqual(list(ws.iterdir()), [])
+            used = tmp / 'used'
+            used.mkdir()
+            (used / 'leftover').write_text('x')
+            result = self.fetch(tmp, merge, used)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('::error::the workspace is not empty', result.stdout)
 
 
 class SelectHistory(unittest.TestCase):
