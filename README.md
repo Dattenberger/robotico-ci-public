@@ -31,6 +31,7 @@ jobs:
 range. A reusable `history: full` call also scans all history when its caller is a PR workflow.
 The workflow fetches with plain git (all branches and tags, full history, the commit under test checked out) rather
 than `actions/checkout`, whose credential cleanup fails on a gitlink that has no `.gitmodules` entry.
+It needs an empty workspace, so it runs only on ephemeral runners (the CI pool, GitHub-hosted).
 
 To use the composite directly, check out the target repository with `fetch-depth: 0` and
 `persist-credentials: false`, then call `Dattenberger/robotico-ci-public/actions/gitleaks-scan@v1`.

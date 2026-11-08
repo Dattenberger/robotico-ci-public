@@ -200,9 +200,9 @@ class FetchHistory(unittest.TestCase):
         self.git(repo, 'config', 'uploadpack.allowAnySHA1InWant', 'true')
         return merge
 
-    def fetch(self, tmp: Path, sha: str, workspace: Path) -> subprocess.CompletedProcess:
+    def fetch(self, tmp: Path, sha: str, workspace: Path, global_config: str = '/dev/null') -> subprocess.CompletedProcess:
         env = dict(os.environ, RCI_TOKEN='t0ken', RCI_SERVER=f'file://{tmp}', RCI_REPO='owner/repo.git',
-                   RCI_SHA=sha, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+                   RCI_SHA=sha, GIT_CONFIG_GLOBAL=global_config, GIT_CONFIG_NOSYSTEM='1')
         steps = load(ROOT / '.github/workflows/secret-scan.yml')['jobs']['gitleaks']['steps']
         script = step_named(steps, 'Fetch history')['run']
         return subprocess.run(['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script],
@@ -225,6 +225,18 @@ class FetchHistory(unittest.TestCase):
             self.assertEqual(self.git(ws, 'status', '--porcelain'), '')
             self.assertNotIn('t0ken', (ws / '.git/config').read_text())
             self.assertIn('::add-mask::', result.stdout)
+
+    def test_harmless_runner_http_settings_pass_the_credential_guard(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='rci-fetch-') as raw:
+            tmp = Path(raw)
+            merge = self.origin(tmp)
+            config = tmp / 'gitconfig'
+            config.write_text('[http]\n\tversion = HTTP/1.1\n\tsslCAInfo = /etc/ssl/certs/ca-certificates.crt\n')
+            ws = tmp / 'ws'
+            ws.mkdir()
+            result = self.fetch(tmp, merge, ws, str(config))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(self.git(ws, 'rev-parse', 'HEAD'), merge)
 
     def test_refuses_an_invalid_sha_or_a_used_workspace(self) -> None:
         with tempfile.TemporaryDirectory(prefix='rci-fetch-') as raw:
