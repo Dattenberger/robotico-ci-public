@@ -151,6 +151,19 @@ class RunUnderGitHubBash(unittest.TestCase):
         self.assertIn(f"--config={self.tmp}/actions/gitleaks-merges/../../.gitleaks.toml", args)
         self.assertFalse((self.tmp / "docker-args").exists())
 
+    def test_the_targets_own_config_wins_when_it_is_a_regular_file(self) -> None:
+        binary = str(self.tmp / "bin/gitleaks")
+        shipped = f"--config={self.tmp}/actions/gitleaks-merges/../../.gitleaks.toml"
+        (self.full / ".gitleaks.toml").write_text("[extend]\nuseDefault = true\n")
+        r = self.run_text(self.full_history(), self.full, RCI_BINARY=binary)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"--config={self.full}/.gitleaks.toml", (self.tmp / "gitleaks-args").read_text().splitlines())
+        (self.full / ".gitleaks.toml").unlink()
+        (self.full / ".gitleaks.toml").symlink_to(self.tmp / "elsewhere.toml")
+        r = self.run_text(self.full_history(), self.full, RCI_BINARY=binary)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(shipped, (self.tmp / "gitleaks-args").read_text().splitlines())
+
     def test_a_graft_that_hides_history_is_no_verdict_for_both_scans(self) -> None:
         head = subprocess.run(["git", "--no-optional-locks", "-C", str(self.full), "rev-parse", "HEAD"], capture_output=True, text=True,
                               check=True).stdout

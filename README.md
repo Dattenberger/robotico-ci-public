@@ -33,11 +33,12 @@ range. A reusable `history: full` call also scans all history when its caller is
 To use the composite directly, check out the target repository with `fetch-depth: 0` and
 `persist-credentials: false`, then call `Dattenberger/robotico-ci-public/actions/gitleaks-scan@v1`.
 Its optional `range` input accepts exactly two lowercase 40-character commit SHAs separated by `..`; empty means
-all history. The history scan's optional `config` input defaults to the `.gitleaks.toml` shipped with the action,
-independently of the target checkout. A supplied config path resolves from the checkout.
+all history. Without a `config` input both scans use the target checkout's own `.gitleaks.toml` (a regular file at its root)
+when present, as dev-hooks does locally; otherwise the history scan uses the one shipped here and the merge scan the
+built-in rules. A supplied config path resolves from the checkout.
 
-**Known limit:** the byte-copied merge scanner retains dev-hooks' behaviour: it uses the target checkout's
-`.gitleaks.toml` when present, otherwise the built-in rules. A target config can narrow the merge scan only.
+**Known limits:** a repository's own `.gitleaks.toml` can narrow both scans; robotico-ci's repo-standard keeps the
+copies byte-identical to the shared one.
 The scan catches accidental leaks; it is no control against an author who suppresses a finding on purpose
 (`.gitleaksignore` and `gitleaks:allow` comments in the scanned tree are honoured). No merge queue support yet
 (`merge_group` trigger missing): a repository that enables a merge queue needs it first. Both scans refuse shallow checkouts,

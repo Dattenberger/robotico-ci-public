@@ -1,7 +1,7 @@
 # Both scans share the pinned installer and merge runner without a nested action reference.
 # Paths resolve in this action's repository, while the scans run on the caller's checkout.
-# Known limit: config applies to history only. The byte-copied merge scanner uses the target's .gitleaks.toml
-# (or built-ins), so a target config can narrow the merge scan. The shipped history config extends built-ins only.
+# Config: the target checkout's own .gitleaks.toml (a regular file at its root) when present, as dev-hooks and the
+# byte-copied merge scanner use it, otherwise this repository's shipped one; repo-standard keeps the copies identical.
 # @see README.md, contract/gitleaks-merges/README.md
 name: gitleaks-scan
 description: Scan git history and merges with the pinned gitleaks binary.
@@ -12,7 +12,7 @@ inputs:
     required: false
     default: ""
   config:
-    description: "History scan config; empty uses this action repository's .gitleaks.toml"
+    description: "History scan config; empty uses the target's .gitleaks.toml, else this repository's"
     required: false
     default: ""
 
@@ -63,7 +63,11 @@ runs:
           echo "::error::git could not read the selected history - no verdict"; exit 1
         fi
         expected=$(awk '/^@/ { c = $0; next } $1 != "-" && $1 > 0 { s[c] = 1 } END { print length(s) }' <<< "$textual")
-        config=${RCI_CONFIG:-$GITHUB_ACTION_PATH/../../.gitleaks.toml}
+        config=$RCI_CONFIG
+        if [ -z "$config" ]; then
+          config=$GITHUB_ACTION_PATH/../../.gitleaks.toml
+          if [ -f .gitleaks.toml ] && [ ! -L .gitleaks.toml ]; then config=$PWD/.gitleaks.toml; fi
+        fi
         out=$(env -u GITLEAKS_CONFIG -u GITLEAKS_CONFIG_TOML GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
           GIT_NO_REPLACE_OBJECTS=1 "$RCI_BINARY" \
           detect --redact --verbose --no-banner --config="$config" --exit-code=99 \
