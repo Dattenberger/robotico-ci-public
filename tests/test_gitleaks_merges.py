@@ -55,7 +55,9 @@ class RunUnderGitHubBash(unittest.TestCase):
         git = ["git", "--no-optional-locks", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "core.hooksPath=/dev/null", "-C", str(self.full)]
         subprocess.run(["git", "--no-optional-locks", "init", "-q", "-b", "main", str(self.full)], check=True)
         for n in ("1", "2"):
-            subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", n], check=True)
+            (self.full / f"{n}.txt").write_text(f"{n}\n")
+            subprocess.run([*git, "add", f"{n}.txt"], check=True)
+            subprocess.run([*git, "commit", "-q", "-m", n], check=True)
         self.shallow = self.tmp / "shallow"
         subprocess.run(["git", "--no-optional-locks", "clone", "-q", "--depth", "1", f"file://{self.full}", str(self.shallow)], check=True)
 
@@ -217,14 +219,27 @@ class RunUnderGitHubBash(unittest.TestCase):
                         self.assertFalse((self.tmp / name).exists())
                     self.assertFalse((self.full / "injected").exists())
 
-    def test_zero_commits_is_allowed_only_for_an_empty_selection(self) -> None:
+    def test_zero_scanned_commits_pass_only_when_no_selected_commit_adds_text(self) -> None:
+        # gitleaks counts only commits that add text lines (8.30.1, reproduced in the review of INF-400.2.14).
+        repo = self.tmp / "textual"
+        git = ["git", "--no-optional-locks", "-c", "user.email=t@t", "-c", "user.name=t",
+               "-c", "core.hooksPath=/dev/null", "-C", str(repo)]
+        subprocess.run(["git", "--no-optional-locks", "init", "-q", "-b", "main", str(repo)], check=True)
+        (repo / "a.txt").write_text("text\n")
+        subprocess.run([*git, "add", "a.txt"], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "adds text"], check=True)
+        first = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run([*git, "rm", "-q", "a.txt"], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "deletes only"], check=True)
+        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "empty"], check=True)
+        (repo / "b.bin").write_bytes(b"\x00\x01\x02")
+        subprocess.run([*git, "add", "b.bin"], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "binary only"], check=True)
+        head = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
         binary = str(self.tmp / "bin/gitleaks")
-        head = self.git_revision('HEAD')
-        for selected, succeeds in ((f"{head}..{head}", True),
-                                   (f"{self.git_revision('HEAD^')}..{head}", False), ("", False)):
+        for selected, succeeds in ((f"{head}..{head}", True), (f"{first}..{head}", True), ("", False)):
             with self.subTest(range=selected):
-                r = self.run_text(self.full_history(), self.full, RCI_BINARY=binary, RCI_RANGE=selected,
-                                  FAKE_SCANNED="0")
+                r = self.run_text(self.full_history(), repo, RCI_BINARY=binary, RCI_RANGE=selected, FAKE_SCANNED="0")
                 self.assertEqual(r.returncode, 0 if succeeds else 1, r.stdout + r.stderr)
                 if not succeeds:
                     self.assertIn("scanned 0 commits", r.stdout)
@@ -232,6 +247,15 @@ class RunUnderGitHubBash(unittest.TestCase):
         subprocess.run(["git", "--no-optional-locks", "init", "-q", str(empty)], check=True)
         r = self.run_text(self.full_history(), empty, RCI_BINARY=binary, FAKE_SCANNED="0")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_the_scan_composite_reaches_the_shipped_config_and_installer(self) -> None:
+        action = ROOT / "actions" / "gitleaks-scan"
+        self.assertEqual((action / "../../.gitleaks.toml").resolve(), (ROOT / ".gitleaks.toml").resolve())
+        self.assertTrue((action / "../gitleaks-pinned/install.sh").resolve().is_file())
+        self.assertTrue((action / "../gitleaks-merges/run.sh").resolve().is_file())
+        text = (action / "action.yml").read_text()
+        self.assertIn("$GITHUB_ACTION_PATH/../../.gitleaks.toml", text)
+        self.assertIn("$GITHUB_ACTION_PATH/../gitleaks-merges/run.sh", text)
 
     def test_unreadable_revision_range_fails_before_history_scan(self) -> None:
         r = self.run_text(self.full_history(), self.full, RCI_BINARY=str(self.tmp / "bin/gitleaks"),

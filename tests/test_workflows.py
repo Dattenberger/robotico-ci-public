@@ -123,7 +123,7 @@ class WorkflowShape(unittest.TestCase):
         doc = load(ROOT / '.github/workflows/secret-scan.yml')
         self.assertEqual(set(doc), {'name', 'on', 'permissions', 'jobs'})
         self.assertEqual(doc['name'], 'secret-scan')
-        self.assertEqual(doc['on'], {'pull_request': None, 'workflow_call': {'inputs': {
+        self.assertEqual(doc['on'], {'pull_request': {'types': ['opened', 'synchronize', 'reopened', 'edited']}, 'workflow_call': {'inputs': {
             'history': {'description': 'History to scan: full or pr (pr requires a pull_request event)',
                         'type': 'string', 'default': 'full'}}}})
         self.assertEqual(doc['permissions'], {'contents': 'read'})

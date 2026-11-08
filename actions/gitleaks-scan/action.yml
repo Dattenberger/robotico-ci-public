@@ -53,9 +53,16 @@ runs:
           revisions=("$RCI_RANGE")
           log_opts="--root --full-history --no-textconv --no-ext-diff $RCI_RANGE"
         fi
-        if ! commits=$(git --no-optional-locks rev-list --count "${revisions[@]}"); then
+        if ! git --no-optional-locks rev-list --count "${revisions[@]}" > /dev/null; then
           echo "::error::git could not count the selected history - no verdict"; exit 1
         fi
+        # gitleaks counts only commits that add text lines; deletions, binaries, empty commits and merges count 0.
+        # The positive control therefore expects scanned commits only when such a commit is selected.
+        if ! textual=$(git --no-optional-locks -c core.quotePath=false log --no-merges --root --no-textconv \
+            --no-ext-diff --diff-filter=d --numstat --format=@%H "${revisions[@]}"); then
+          echo "::error::git could not read the selected history - no verdict"; exit 1
+        fi
+        expected=$(awk '/^@/ { c = $0; next } $1 != "-" && $1 > 0 { s[c] = 1 } END { print length(s) }' <<< "$textual")
         config=${RCI_CONFIG:-$GITHUB_ACTION_PATH/../../.gitleaks.toml}
         out=$(env -u GITLEAKS_CONFIG -u GITLEAKS_CONFIG_TOML GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
           GIT_NO_REPLACE_OBJECTS=1 "$RCI_BINARY" \
@@ -67,8 +74,8 @@ runs:
           echo "::error::git reported an error inside the scan - partial scan, no verdict"; exit 1
         fi
         scanned=$(grep -oE '[0-9]+ commits scanned' <<< "$out" | grep -oE '^[0-9]+' | tail -1)
-        if [ "$rc" = 0 ] && [ "$commits" != 0 ] && [ "${scanned:-0}" = 0 ]; then
-          echo "::error::gitleaks scanned ${scanned:-no} commits of a repository that has some - no verdict"; exit 1
+        if [ "$rc" = 0 ] && [ "$expected" != 0 ] && [ "${scanned:-0}" = 0 ]; then
+          echo "::error::gitleaks scanned ${scanned:-no} commits of a selection with $expected text-adding commits - no verdict"; exit 1
         fi
         case $rc in
           0) ;;

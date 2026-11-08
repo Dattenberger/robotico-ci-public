@@ -37,8 +37,10 @@ all history. The history scan's optional `config` input defaults to the `.gitlea
 independently of the target checkout. A supplied config path resolves from the checkout.
 
 **Known limit:** the byte-copied merge scanner retains dev-hooks' behaviour: it uses the target checkout's
-`.gitleaks.toml` when present, otherwise the built-in rules. A target config can narrow the merge scan only; the
-default history config always extends the built-in rules without allowances. Both scans refuse shallow checkouts,
+`.gitleaks.toml` when present, otherwise the built-in rules. A target config can narrow the merge scan only.
+The scan catches accidental leaks; it is no control against an author who suppresses a finding on purpose
+(`.gitleaksignore` and `gitleaks:allow` comments in the scanned tree are honoured). No merge queue support yet
+(`merge_group` trigger missing): a repository that enables a merge queue needs it first. Both scans refuse shallow checkouts,
 grafts and symlinks in the git directory, ignore replace refs, and disable repository diff drivers. Merge findings have no commit fingerprint; allowances
 belong in the target checkout's `.gitleaks.toml`. Binary merge content is outside the patch scanner's coverage.
 
