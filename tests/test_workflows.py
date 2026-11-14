@@ -243,17 +243,27 @@ class FetchHistory(unittest.TestCase):
             default = self.git(origin, 'rev-parse', 'main')
             other = self.git(origin, 'rev-parse', 'side')
             self.git(origin, 'update-ref', 'refs/heads/stable', default)
+            # The event commit of a PR run is the synthetic merge of the default tip and the PR head.
+            env = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t', GIT_COMMITTER_NAME='t',
+                       GIT_COMMITTER_EMAIL='t@t')
+            merge = subprocess.run(['git', '-C', str(origin), 'commit-tree', f'{head}^{{tree}}', '-p', default,
+                                    '-p', head, '-m', 'pr merge'], env=env, check=True, capture_output=True,
+                                   text=True).stdout.strip()
+            self.git(origin, 'update-ref', 'refs/pull/2/merge', merge)
             ws = tmp / 'ws'
             ws.mkdir()
-            result = self.fetch(tmp, other, ws, RCI_HISTORY='full', RCI_EVENT='pull_request',
+            result = self.fetch(tmp, merge, ws, RCI_HISTORY='full', RCI_EVENT='pull_request',
                                 RCI_DEFAULT_BRANCH='stable', RCI_HEAD=head)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(self.git(ws, 'rev-parse', 'HEAD'), head)
+            # The checkout is the merged tree, so the scan reads the merged .gitleaks.toml and .gitleaksignore.
+            self.assertEqual(self.git(ws, 'rev-parse', 'HEAD'), merge)
             self.assertEqual(self.git(ws, 'rev-parse', 'refs/remotes/rci/default'), default)
+            self.assertEqual(self.git(ws, 'rev-parse', 'refs/remotes/rci/head'), head)
             self.assertEqual(self.git(ws, 'for-each-ref', '--format=%(refname)').split(),
-                             ['refs/remotes/origin/stable', 'refs/remotes/rci/default', 'refs/remotes/rci/head'])
+                             ['refs/remotes/origin/stable', 'refs/remotes/rci/checkout', 'refs/remotes/rci/default',
+                              'refs/remotes/rci/head'])
             self.assertNotIn(other, self.git(ws, 'rev-list', '--all').splitlines())
-            self.assertEqual(self.git(ws, 'rev-list', '--count', '--all'), '3')
+            self.assertEqual(self.git(ws, 'rev-list', '--count', '--all'), '4')
             self.assertNotIn('t0ken', (ws / '.git/config').read_text())
 
     def test_pr_mode_fetch_is_unchanged(self) -> None:

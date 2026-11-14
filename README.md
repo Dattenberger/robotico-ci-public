@@ -31,9 +31,10 @@ jobs:
 range. On a `pull_request` event, a reusable `history: full` call scans the union of the repository's default
 branch history and the PR head's history, including findings removed by later commits. Commits reachable only
 from other branches or tags are excluded. The default branch is the repository's configured default, even when
-the PR targets another branch. The workflow fetches only that branch and the PR head with complete histories,
-then checks out the PR head. The synthetic PR merge commit is outside this selection; actual merges in either
-selected history are scanned for their own content.
+the PR targets another branch. The workflow fetches only that branch, the PR head and the event commit (the PR
+merge commit) with complete histories, and checks out the event commit, so `.gitleaks.toml` and `.gitleaksignore`
+come from the merged tree as in every other mode. The synthetic PR merge commit itself is outside the scanned
+selection; actual merges in either selected history are scanned for their own content.
 
 Other events using `history: full` retain the all-branch, all-tag scan and checkout of the event commit.
 The `pr` mode keeps its `base.sha..head.sha` selection and existing fetch behaviour.
