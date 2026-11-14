@@ -71,12 +71,14 @@ class ScanScope(unittest.TestCase):
         self.tips[branch] = self.git('rev-parse', 'HEAD')
         self.git('checkout', '-q', 'pr')
 
-    def scan(self, merges: bool = False, **env: str) -> subprocess.CompletedProcess:
+    def scan(self, merges: bool = False, workspace: Path | None = None, **env: str) -> subprocess.CompletedProcess:
         action = load(ROOT / 'actions/gitleaks-scan/action.yml')
         name = "gitleaks over the merges' own content" if merges else 'gitleaks (history)'
         script = step_named(action['runs']['steps'], name)['run']
         return subprocess.run(['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script],
-                              cwd=self.repo, env=dict(self.base_env, **env), capture_output=True, text=True)
+                              cwd=workspace or self.repo,
+                              env=dict(self.base_env, GITHUB_WORKSPACE=str(workspace or self.repo), **env),
+                              capture_output=True, text=True)
 
     def selected(self) -> str:
         return f"{self.tips['trunk']} {self.tips['pr']}"
@@ -158,3 +160,49 @@ class ScanScope(unittest.TestCase):
             result = self.scan(merges, RCI_REVISIONS=f"{self.tips['trunk']} {'0' * 40}")
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertFalse((self.tmp / 'args').exists())
+
+    def full_pr_workflow(self) -> tuple[Path, str]:
+        origin = self.tmp / 'owner/repo.git'
+        origin.parent.mkdir()
+        self.git('clone', '-q', '--bare', str(self.repo), str(origin))
+        workspace = self.tmp / 'workspace'
+        workspace.mkdir()
+        output = self.tmp / 'output'
+        env = dict(self.env, RCI_HISTORY='full', RCI_EVENT='pull_request',
+                   RCI_BASE=self.tips['other'], RCI_HEAD=self.tips['pr'], RCI_SHA=self.tips['pr'],
+                   RCI_DEFAULT_BRANCH='trunk', RCI_TOKEN='fixture', RCI_SERVER=f'file://{self.tmp}',
+                   RCI_REPO='owner/repo.git', GITHUB_OUTPUT=str(output))
+        steps = load(ROOT / '.github/workflows/secret-scan.yml')['jobs']['gitleaks']['steps']
+        for name in ('Fetch history', 'Select history'):
+            result = subprocess.run(['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail',
+                                     '-c', step_named(steps, name)['run']],
+                                    cwd=workspace, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        selected = dict(line.split('=', 1) for line in output.read_text().splitlines())
+        self.assertEqual(selected, {'range': '', 'revisions': self.selected()})
+        return workspace, selected['revisions']
+
+    def test_full_pr_workflow_excludes_foreign_findings_from_both_scans(self) -> None:
+        self.finding('other', merge=True)
+        self.finding('other')
+        self.git('tag', 'foreign-only', self.tips['other'])
+        workspace, revisions = self.full_pr_workflow()
+        for merges in (False, True):
+            result = self.scan(merges, workspace=workspace, RCI_REVISIONS=revisions)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(set((self.tmp / 'scanned').read_text().splitlines()),
+                         set(self.git('rev-list', *self.selected().split()).splitlines()))
+
+    def test_full_pr_workflow_default_history_finding_fails(self) -> None:
+        self.finding('trunk')
+        workspace, revisions = self.full_pr_workflow()
+        result = self.scan(workspace=workspace, RCI_REVISIONS=revisions)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('found potential secrets', result.stdout)
+
+    def test_full_pr_workflow_own_commit_finding_fails(self) -> None:
+        self.finding('pr')
+        workspace, revisions = self.full_pr_workflow()
+        result = self.scan(workspace=workspace, RCI_REVISIONS=revisions)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('found potential secrets', result.stdout)
