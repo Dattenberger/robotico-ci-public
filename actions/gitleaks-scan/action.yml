@@ -8,7 +8,11 @@ description: Scan git history and merges with the pinned gitleaks binary.
 
 inputs:
   range:
-    description: "Two lowercase 40-character commit SHAs (A..B); empty scans all history"
+    description: "Two lowercase 40-character commit SHAs (A..B); empty with no revisions scans all refs"
+    required: false
+    default: ""
+  revisions:
+    description: "Space-separated lowercase 40-character commit SHAs; scans their combined history, exclusive with range"
     required: false
     default: ""
   config:
@@ -29,11 +33,18 @@ runs:
       env:
         RCI_BINARY: ${{ steps.gitleaks.outputs.path }}
         RCI_RANGE: ${{ inputs.range }}
+        RCI_REVISIONS: ${{ inputs.revisions }}
         RCI_CONFIG: ${{ inputs.config }}
       run: |
         set +e -uo pipefail
         if [ -n "$RCI_RANGE" ] && ! [[ "$RCI_RANGE" =~ ^[0-9a-f]{40}\.\.[0-9a-f]{40}$ ]]; then
           echo "::error::invalid range - expected two lowercase 40-character commit SHAs separated by .."; exit 1
+        fi
+        if [ -n "$RCI_REVISIONS" ] && ! [[ "$RCI_REVISIONS" =~ ^[0-9a-f]{40}(\ [0-9a-f]{40})*$ ]]; then
+          echo "::error::invalid revisions - expected space-separated lowercase 40-character commit SHAs"; exit 1
+        fi
+        if [ -n "$RCI_RANGE" ] && [ -n "$RCI_REVISIONS" ]; then
+          echo "::error::range and revisions are mutually exclusive"; exit 1
         fi
         cd "$GITHUB_WORKSPACE" || exit 1
         export GIT_NO_REPLACE_OBJECTS=1
@@ -52,6 +63,10 @@ runs:
         if [ -n "$RCI_RANGE" ]; then
           revisions=("$RCI_RANGE")
           log_opts="--root --full-history --no-textconv --no-ext-diff $RCI_RANGE"
+        fi
+        if [ -n "$RCI_REVISIONS" ]; then
+          read -r -a revisions <<< "$RCI_REVISIONS"
+          log_opts="--root --full-history --no-textconv --no-ext-diff $RCI_REVISIONS"
         fi
         if ! git --no-optional-locks rev-list --count "${revisions[@]}" > /dev/null; then
           echo "::error::git could not count the selected history - no verdict"; exit 1
@@ -92,4 +107,5 @@ runs:
         RCI_IMAGE: ""
         RCI_BINARY: ${{ steps.gitleaks.outputs.path }}
         RCI_RANGE: ${{ inputs.range }}
-      run: bash "$GITHUB_ACTION_PATH/../gitleaks-merges/run.sh" "$RCI_RANGE"
+        RCI_REVISIONS: ${{ inputs.revisions }}
+      run: bash "$GITHUB_ACTION_PATH/../gitleaks-merges/run.sh" "$RCI_RANGE" "$RCI_REVISIONS"

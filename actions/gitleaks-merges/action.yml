@@ -1,4 +1,4 @@
-# Scans every reachable merge's own content with the caller's .gitleaks.toml and dev-hooks' byte copy.
+# Scans selected merges' own content with the caller's .gitleaks.toml and dev-hooks' byte copy.
 # Exactly one runner is required: the pinned binary path or the pinned image (pulled here). Inputs reach the
 # script only through env. The caller checks out with fetch-depth 0; shallow history, grafts and git-dir
 # symlinks are refused as no verdict, and replace refs are ignored for either runner.
@@ -16,6 +16,10 @@ inputs:
     description: "Path to the pinned gitleaks binary (exclusive with image)"
     required: false
     default: ""
+  revisions:
+    description: "Space-separated lowercase 40-character commit SHAs; empty scans all refs"
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -25,4 +29,5 @@ runs:
       env:
         RCI_IMAGE: ${{ inputs.image }}
         RCI_BINARY: ${{ inputs.binary }}
-      run: bash "$GITHUB_ACTION_PATH/run.sh"
+        RCI_REVISIONS: ${{ inputs.revisions }}
+      run: bash "$GITHUB_ACTION_PATH/run.sh" "" "$RCI_REVISIONS"

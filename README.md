@@ -35,8 +35,14 @@ It needs an empty workspace, so it runs only on ephemeral runners (the CI pool, 
 
 To use the composite directly, check out the target repository with `fetch-depth: 0` and
 `persist-credentials: false`, then call `Dattenberger/robotico-ci-public/actions/gitleaks-scan@v1`.
-Its optional `range` input accepts exactly two lowercase 40-character commit SHAs separated by `..`; empty means
-all history. Without a `config` input both scans use the target checkout's own `.gitleaks.toml` (a regular file at its root)
+Its optional `range` input accepts exactly two lowercase 40-character commit SHAs separated by `..`. Its optional `revisions` input accepts one or more lowercase 40-character commit SHAs separated
+by single spaces, scanning the union of their reachable histories. It is mutually exclusive with `range`;
+leaving both empty preserves the all-ref scan. For a full PR scan, supply the default-branch tip and PR head SHA
+after fetching their complete histories. Both the history and merge scans use the same selection.
+The standalone `actions/gitleaks-merges` composite also accepts optional `revisions`; leaving it empty retains
+its all-ref scan. Its existing `binary` and `image` inputs keep their meaning.
+
+Without a `config` input both scans use the target checkout's own `.gitleaks.toml` (a regular file at its root)
 when present, as dev-hooks does locally; otherwise the history scan uses the one shipped here and the merge scan the
 built-in rules. A supplied config path resolves from the checkout.
 

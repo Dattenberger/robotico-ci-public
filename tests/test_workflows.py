@@ -63,15 +63,16 @@ class Copy(unittest.TestCase):
 class Composites(unittest.TestCase):
     def test_standalone_merges_preserves_its_interface_and_uses_env_only(self) -> None:
         action = load(ROOT / 'actions/gitleaks-merges/action.yml')
-        self.assertEqual(set(action['inputs']), {'image', 'binary'})
-        for name in ('image', 'binary'):
+        self.assertEqual(set(action['inputs']), {'image', 'binary', 'revisions'})
+        for name in ('image', 'binary', 'revisions'):
             self.assertEqual(action['inputs'][name]['required'], False)
             self.assertEqual(action['inputs'][name]['default'], '')
         self.assertEqual(action['runs']['using'], 'composite')
         (step,) = action['runs']['steps']
-        self.assertEqual(step['env'], {'RCI_IMAGE': '${{ inputs.image }}', 'RCI_BINARY': '${{ inputs.binary }}'})
+        self.assertEqual(step['env'], {'RCI_IMAGE': '${{ inputs.image }}', 'RCI_BINARY': '${{ inputs.binary }}',
+                                       'RCI_REVISIONS': '${{ inputs.revisions }}'})
         self.assertEqual(step['shell'], 'bash')
-        self.assertEqual(step['run'], 'bash "$GITHUB_ACTION_PATH/run.sh"')
+        self.assertEqual(step['run'], 'bash "$GITHUB_ACTION_PATH/run.sh" "" "$RCI_REVISIONS"')
         script = (ROOT / 'actions/gitleaks-merges/run.sh').read_text()
         self.assertNotIn('${{', script)
         self.assertIn('docker pull -q "$RCI_IMAGE"', script)
@@ -93,8 +94,8 @@ class Composites(unittest.TestCase):
 
     def test_scan_inputs_steps_and_shared_scripts(self) -> None:
         action = load(ROOT / 'actions/gitleaks-scan/action.yml')
-        self.assertEqual(set(action['inputs']), {'range', 'config'})
-        for name in ('range', 'config'):
+        self.assertEqual(set(action['inputs']), {'range', 'config', 'revisions'})
+        for name in ('range', 'config', 'revisions'):
             self.assertEqual(action['inputs'][name]['required'], False)
             self.assertEqual(action['inputs'][name]['default'], '')
         self.assertEqual(action['runs']['using'], 'composite')
@@ -104,11 +105,12 @@ class Composites(unittest.TestCase):
         self.assertEqual(history['name'], 'gitleaks (history)')
         self.assertEqual(history['shell'], 'bash')
         self.assertEqual(history['env'], {'RCI_BINARY': '${{ steps.gitleaks.outputs.path }}',
-                                         'RCI_RANGE': '${{ inputs.range }}', 'RCI_CONFIG': '${{ inputs.config }}'})
+                                         'RCI_RANGE': '${{ inputs.range }}', 'RCI_REVISIONS': '${{ inputs.revisions }}',
+                                         'RCI_CONFIG': '${{ inputs.config }}'})
         self.assertEqual(merges, {'name': "gitleaks over the merges' own content", 'shell': 'bash',
                                  'env': {'RCI_IMAGE': '', 'RCI_BINARY': '${{ steps.gitleaks.outputs.path }}',
-                                         'RCI_RANGE': '${{ inputs.range }}'},
-                                 'run': 'bash "$GITHUB_ACTION_PATH/../gitleaks-merges/run.sh" "$RCI_RANGE"'})
+                                         'RCI_RANGE': '${{ inputs.range }}', 'RCI_REVISIONS': '${{ inputs.revisions }}'},
+                                 'run': 'bash "$GITHUB_ACTION_PATH/../gitleaks-merges/run.sh" "$RCI_RANGE" "$RCI_REVISIONS"'})
         for step in (install, history, merges):
             self.assertNotIn('uses', step)
             self.assertNotIn('${{', step['run'])
