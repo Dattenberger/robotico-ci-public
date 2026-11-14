@@ -6,9 +6,11 @@ shows). The pin travels beside it because both the script and `actions/gitleaks-
 version, image digest and Linux x64 archive checksum. `SOURCE.json` records the source commit and both sha256s;
 `tests/test_workflows.py` checks the hashes and modes (100755 for the script, 100644 for the pin).
 `actions/gitleaks-merges/run.sh` runs the script with exactly one of `image` or `binary`.
-Both `actions/gitleaks-merges` and `actions/gitleaks-scan` use that runner; an empty range selects `--all`, while
-the scan composite can supply a validated `A..B` range. `actions/gitleaks-pinned/install.sh` supplies the verified
-binary to either composite.
+Both `actions/gitleaks-merges` and `actions/gitleaks-scan` use that runner. It accepts an optional `A..B` range
+as its first argument or space-separated commit SHAs as its second, with both selections validated by the runner
+and mutually exclusive. Omitting both selects `--all`. The scan composite passes either input; the standalone
+merge composite exposes the optional SHA list as `revisions`. The copied script and its contract stay unchanged.
+`actions/gitleaks-pinned/install.sh` supplies the verified binary to either composite.
 
 dev-hooks is the source: its tests run the scan against real repositories; this repository checks the action wiring
 with fake tools and checks the workflow calls.

@@ -1,4 +1,24 @@
 #!/bin/bash
+# Optional scope tests use harmless markers in real patches and merge trees.
+if [ "${FAKE_SCOPE_SCAN:-0}" = 1 ]; then
+  if [ "$1" = version ]; then echo "$FAKE_PINNED_VERSION"; exit 0; fi
+  printf '%s\n' "$@" >> "$FAKE_GITLEAKS_ARGS"
+  if [ "$1" = detect ]; then
+    for arg in "$@"; do
+      case "$arg" in --log-opts=*) read -r -a opts <<< "${arg#--log-opts=}" ;; esac
+    done
+    git rev-list "${opts[@]}" > "$FAKE_SCANNED_REVISIONS" || exit 2
+    patch=$(git log -p "${opts[@]}") || exit 2
+    echo "$(wc -l < "$FAKE_SCANNED_REVISIONS") commits scanned."
+    if grep -q '^+scan-fixture-finding$' <<< "$patch"; then exit 99; fi
+  elif [ "$1" = dir ]; then
+    echo 'scanned ~100 bytes'
+    if grep -rq '^scan-fixture-finding$' .; then exit 1; fi
+  else
+    exit 2
+  fi
+  exit 0
+fi
 printf '%s\n' "$@" >> "$FAKE_GITLEAKS_ARGS"
 if [ -n "${FAKE_ENV_OUTPUT:-}" ]; then
   env > "$FAKE_ENV_OUTPUT"

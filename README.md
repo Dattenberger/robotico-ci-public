@@ -28,15 +28,30 @@ jobs:
 
 `history` defaults to `full`. Set it to `pr` to scan the PR range in a calling workflow triggered by
 `pull_request`; other events fail with that setting. Direct PR runs of the required workflow always select the PR
-range. A reusable `history: full` call also scans all history when its caller is a PR workflow.
-The workflow fetches with plain git (all branches and tags, full history, the commit under test checked out) rather
-than `actions/checkout`, whose credential cleanup fails on a gitlink that has no `.gitmodules` entry.
+range. On a `pull_request` event, a reusable `history: full` call scans the union of the repository's default
+branch history and the PR head's history, including findings removed by later commits. Commits reachable only
+from other branches or tags are excluded. The default branch is the repository's configured default, even when
+the PR targets another branch. The workflow fetches only that branch, the PR head and the event commit (the PR
+merge commit) with complete histories, and checks out the event commit, so `.gitleaks.toml` and `.gitleaksignore`
+come from the merged tree as in every other mode. The synthetic PR merge commit itself is outside the scanned
+selection; actual merges in either selected history are scanned for their own content.
+
+Other events using `history: full` retain the all-branch, all-tag scan and checkout of the event commit.
+The `pr` mode keeps its `base.sha..head.sha` selection and existing fetch behaviour.
+The workflow fetches with plain git rather than `actions/checkout`, whose credential cleanup fails on a gitlink
+that has no `.gitmodules` entry.
 It needs an empty workspace, so it runs only on ephemeral runners (the CI pool, GitHub-hosted).
 
 To use the composite directly, check out the target repository with `fetch-depth: 0` and
 `persist-credentials: false`, then call `Dattenberger/robotico-ci-public/actions/gitleaks-scan@v1`.
-Its optional `range` input accepts exactly two lowercase 40-character commit SHAs separated by `..`; empty means
-all history. Without a `config` input both scans use the target checkout's own `.gitleaks.toml` (a regular file at its root)
+Its optional `range` input accepts exactly two lowercase 40-character commit SHAs separated by `..`. Its optional `revisions` input accepts one or more lowercase 40-character commit SHAs separated
+by single spaces, scanning the union of their reachable histories. It is mutually exclusive with `range`;
+leaving both empty preserves the all-ref scan. For a full PR scan, supply the default-branch tip and PR head SHA
+after fetching their complete histories. Both the history and merge scans use the same selection.
+The standalone `actions/gitleaks-merges` composite also accepts optional `revisions`; leaving it empty retains
+its all-ref scan. Its existing `binary` and `image` inputs keep their meaning.
+
+Without a `config` input both scans use the target checkout's own `.gitleaks.toml` (a regular file at its root)
 when present, as dev-hooks does locally; otherwise the history scan uses the one shipped here and the merge scan the
 built-in rules. A supplied config path resolves from the checkout.
 
@@ -57,3 +72,6 @@ Run `python3 -m unittest discover -s tests -t .` for offline unittest tests with
 YAML loader (PyYAML, supplied by the supported runners), and `bash -n` on every `.sh` file. This repository's `ci`
 job runs the unit tests and the local composite over its full history, so a PR tests its own action tree. Move the
 `v1` tag only after a green `ci` run.
+
+When releasing a new composite input, publish the composite first and move `v1` after its checks pass. Publish
+the reusable workflow change that passes that input only after the tag includes the composite support.

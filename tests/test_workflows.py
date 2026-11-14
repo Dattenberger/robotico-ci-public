@@ -63,15 +63,16 @@ class Copy(unittest.TestCase):
 class Composites(unittest.TestCase):
     def test_standalone_merges_preserves_its_interface_and_uses_env_only(self) -> None:
         action = load(ROOT / 'actions/gitleaks-merges/action.yml')
-        self.assertEqual(set(action['inputs']), {'image', 'binary'})
-        for name in ('image', 'binary'):
+        self.assertEqual(set(action['inputs']), {'image', 'binary', 'revisions'})
+        for name in ('image', 'binary', 'revisions'):
             self.assertEqual(action['inputs'][name]['required'], False)
             self.assertEqual(action['inputs'][name]['default'], '')
         self.assertEqual(action['runs']['using'], 'composite')
         (step,) = action['runs']['steps']
-        self.assertEqual(step['env'], {'RCI_IMAGE': '${{ inputs.image }}', 'RCI_BINARY': '${{ inputs.binary }}'})
+        self.assertEqual(step['env'], {'RCI_IMAGE': '${{ inputs.image }}', 'RCI_BINARY': '${{ inputs.binary }}',
+                                       'RCI_REVISIONS': '${{ inputs.revisions }}'})
         self.assertEqual(step['shell'], 'bash')
-        self.assertEqual(step['run'], 'bash "$GITHUB_ACTION_PATH/run.sh"')
+        self.assertEqual(step['run'], 'bash "$GITHUB_ACTION_PATH/run.sh" "" "$RCI_REVISIONS"')
         script = (ROOT / 'actions/gitleaks-merges/run.sh').read_text()
         self.assertNotIn('${{', script)
         self.assertIn('docker pull -q "$RCI_IMAGE"', script)
@@ -93,8 +94,8 @@ class Composites(unittest.TestCase):
 
     def test_scan_inputs_steps_and_shared_scripts(self) -> None:
         action = load(ROOT / 'actions/gitleaks-scan/action.yml')
-        self.assertEqual(set(action['inputs']), {'range', 'config'})
-        for name in ('range', 'config'):
+        self.assertEqual(set(action['inputs']), {'range', 'config', 'revisions'})
+        for name in ('range', 'config', 'revisions'):
             self.assertEqual(action['inputs'][name]['required'], False)
             self.assertEqual(action['inputs'][name]['default'], '')
         self.assertEqual(action['runs']['using'], 'composite')
@@ -104,11 +105,12 @@ class Composites(unittest.TestCase):
         self.assertEqual(history['name'], 'gitleaks (history)')
         self.assertEqual(history['shell'], 'bash')
         self.assertEqual(history['env'], {'RCI_BINARY': '${{ steps.gitleaks.outputs.path }}',
-                                         'RCI_RANGE': '${{ inputs.range }}', 'RCI_CONFIG': '${{ inputs.config }}'})
+                                         'RCI_RANGE': '${{ inputs.range }}', 'RCI_REVISIONS': '${{ inputs.revisions }}',
+                                         'RCI_CONFIG': '${{ inputs.config }}'})
         self.assertEqual(merges, {'name': "gitleaks over the merges' own content", 'shell': 'bash',
                                  'env': {'RCI_IMAGE': '', 'RCI_BINARY': '${{ steps.gitleaks.outputs.path }}',
-                                         'RCI_RANGE': '${{ inputs.range }}'},
-                                 'run': 'bash "$GITHUB_ACTION_PATH/../gitleaks-merges/run.sh" "$RCI_RANGE"'})
+                                         'RCI_RANGE': '${{ inputs.range }}', 'RCI_REVISIONS': '${{ inputs.revisions }}'},
+                                 'run': 'bash "$GITHUB_ACTION_PATH/../gitleaks-merges/run.sh" "$RCI_RANGE" "$RCI_REVISIONS"'})
         for step in (install, history, merges):
             self.assertNotIn('uses', step)
             self.assertNotIn('${{', step['run'])
@@ -137,7 +139,10 @@ class WorkflowShape(unittest.TestCase):
         self.assertEqual(fetch['name'], 'Fetch history')
         self.assertEqual(fetch['shell'], 'bash')
         self.assertEqual(fetch['env'], {'RCI_TOKEN': '${{ github.token }}', 'RCI_SERVER': '${{ github.server_url }}',
-                                        'RCI_REPO': '${{ github.repository }}', 'RCI_SHA': '${{ github.sha }}'})
+                                        'RCI_REPO': '${{ github.repository }}', 'RCI_SHA': '${{ github.sha }}',
+                                        'RCI_HISTORY': '${{ inputs.history }}', 'RCI_EVENT': '${{ github.event_name }}',
+                                        'RCI_HEAD': '${{ github.event.pull_request.head.sha }}',
+                                        'RCI_DEFAULT_BRANCH': '${{ github.event.repository.default_branch }}'})
         self.assertNotIn('${{', fetch['run'])
         self.assertEqual(select['id'], 'history')
         self.assertEqual(select['shell'], 'bash')
@@ -147,7 +152,8 @@ class WorkflowShape(unittest.TestCase):
                                          'RCI_HEAD': '${{ github.event.pull_request.head.sha }}'})
         self.assertNotIn('${{', select['run'])
         self.assertEqual(scan, {'uses': 'Dattenberger/robotico-ci-public/actions/gitleaks-scan@v1',
-                                'with': {'range': '${{ steps.history.outputs.range }}'}})
+                                'with': {'range': '${{ steps.history.outputs.range }}',
+                                         'revisions': '${{ steps.history.outputs.revisions }}'}})
 
     def test_ci_tests_the_local_tree_with_one_required_job(self) -> None:
         doc = load(ROOT / '.github/workflows/ci.yml')
@@ -200,9 +206,12 @@ class FetchHistory(unittest.TestCase):
         self.git(repo, 'config', 'uploadpack.allowAnySHA1InWant', 'true')
         return merge
 
-    def fetch(self, tmp: Path, sha: str, workspace: Path, global_config: str = '/dev/null') -> subprocess.CompletedProcess:
+    def fetch(self, tmp: Path, sha: str, workspace: Path, global_config: str = '/dev/null',
+              **extra: str) -> subprocess.CompletedProcess:
         env = dict(os.environ, RCI_TOKEN='t0ken', RCI_SERVER=f'file://{tmp}', RCI_REPO='owner/repo.git',
-                   RCI_SHA=sha, GIT_CONFIG_GLOBAL=global_config, GIT_CONFIG_NOSYSTEM='1')
+                   RCI_SHA=sha, RCI_HISTORY='full', RCI_EVENT='push', RCI_BASE='', RCI_HEAD='',
+                   RCI_DEFAULT_BRANCH='', GIT_CONFIG_GLOBAL=global_config, GIT_CONFIG_NOSYSTEM='1')
+        env.update(extra)
         steps = load(ROOT / '.github/workflows/secret-scan.yml')['jobs']['gitleaks']['steps']
         script = step_named(steps, 'Fetch history')['run']
         return subprocess.run(['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script],
@@ -225,6 +234,63 @@ class FetchHistory(unittest.TestCase):
             self.assertEqual(self.git(ws, 'status', '--porcelain'), '')
             self.assertNotIn('t0ken', (ws / '.git/config').read_text())
             self.assertIn('::add-mask::', result.stdout)
+
+    def test_full_pr_fetches_only_default_history_and_pr_head(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='rci-fetch-') as raw:
+            tmp = Path(raw)
+            head = self.origin(tmp)
+            origin = tmp / 'owner/repo.git'
+            default = self.git(origin, 'rev-parse', 'main')
+            other = self.git(origin, 'rev-parse', 'side')
+            self.git(origin, 'update-ref', 'refs/heads/stable', default)
+            # The event commit of a PR run is the synthetic merge of the default tip and the PR head.
+            env = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t', GIT_COMMITTER_NAME='t',
+                       GIT_COMMITTER_EMAIL='t@t')
+            merge = subprocess.run(['git', '-C', str(origin), 'commit-tree', f'{head}^{{tree}}', '-p', default,
+                                    '-p', head, '-m', 'pr merge'], env=env, check=True, capture_output=True,
+                                   text=True).stdout.strip()
+            self.git(origin, 'update-ref', 'refs/pull/2/merge', merge)
+            ws = tmp / 'ws'
+            ws.mkdir()
+            result = self.fetch(tmp, merge, ws, RCI_HISTORY='full', RCI_EVENT='pull_request',
+                                RCI_DEFAULT_BRANCH='stable', RCI_HEAD=head)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            # The checkout is the merged tree, so the scan reads the merged .gitleaks.toml and .gitleaksignore.
+            self.assertEqual(self.git(ws, 'rev-parse', 'HEAD'), merge)
+            self.assertEqual(self.git(ws, 'rev-parse', 'refs/remotes/rci/default'), default)
+            self.assertEqual(self.git(ws, 'rev-parse', 'refs/remotes/rci/head'), head)
+            self.assertEqual(self.git(ws, 'for-each-ref', '--format=%(refname)').split(),
+                             ['refs/remotes/origin/stable', 'refs/remotes/rci/checkout', 'refs/remotes/rci/default',
+                              'refs/remotes/rci/head'])
+            self.assertNotIn(other, self.git(ws, 'rev-list', '--all').splitlines())
+            self.assertEqual(self.git(ws, 'rev-list', '--count', '--all'), '4')
+            self.assertNotIn('t0ken', (ws / '.git/config').read_text())
+
+    def test_pr_mode_fetch_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='rci-fetch-') as raw:
+            tmp = Path(raw)
+            head = self.origin(tmp)
+            for history in ('pr', ''):
+                ws = tmp / ('ws-' + history)
+                ws.mkdir()
+                result = self.fetch(tmp, head, ws, RCI_HISTORY=history, RCI_EVENT='pull_request')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.git(ws, 'rev-list', '--count', '--all'), '4')
+                self.assertEqual(self.git(ws, 'rev-parse', 'HEAD'), head)
+
+    def test_full_pr_rejects_invalid_or_missing_scope_before_fetching(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='rci-fetch-') as raw:
+            tmp = Path(raw)
+            head = self.origin(tmp)
+            for n, (branch, pr_head) in enumerate((('', head), ('../bad', head), ('bad..name', head),
+                                                  ('main', ''), ('main', 'HEAD'), ('main', head + '\n'))):
+                ws = tmp / f'ws-{n}'
+                ws.mkdir()
+                result = self.fetch(tmp, head, ws, RCI_EVENT='pull_request',
+                                    RCI_DEFAULT_BRANCH=branch, RCI_HEAD=pr_head)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn('::error::', result.stdout)
+                self.assertEqual(list(ws.iterdir()), [])
 
     def test_harmless_runner_http_settings_pass_the_credential_guard(self) -> None:
         with tempfile.TemporaryDirectory(prefix='rci-fetch-') as raw:
@@ -259,11 +325,21 @@ class FetchHistory(unittest.TestCase):
 
 
 class SelectHistory(unittest.TestCase):
-    def select(self, history: str, event: str, base: str = 'a' * 40, head: str = 'b' * 40) -> tuple:
+    def select(self, history: str, event: str, base: str = 'a' * 40, head: str = 'b' * 40,
+               default: str = '') -> tuple:
         with tempfile.TemporaryDirectory(prefix='rci-select-history-') as tmp:
+            if default:
+                subprocess.run(['git', 'init', '-q', tmp], check=True)
+                # A real, empty-tree commit gives the selection step a resolvable default tip.
+                env = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t',
+                           GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@t')
+                subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '-C', tmp, 'commit',
+                                         '-q', '--allow-empty', '-m', 'fixture'], env=env, check=True)
+                tip = subprocess.check_output(['git', '-C', tmp, 'rev-parse', 'HEAD'], text=True).strip()
+                subprocess.run(['git', '-C', tmp, 'update-ref', 'refs/remotes/rci/default', tip], check=True)
             output = Path(tmp) / 'output'
             env = dict(os.environ, RCI_HISTORY=history, RCI_EVENT=event, RCI_BASE=base, RCI_HEAD=head,
-                       GITHUB_OUTPUT=str(output))
+                       GITHUB_OUTPUT=str(output), GIT_CEILING_DIRECTORIES=str(Path(tmp).parent))
             steps = load(ROOT / '.github/workflows/secret-scan.yml')['jobs']['gitleaks']['steps']
             script = step_named(steps, 'Select history')['run']
             result = subprocess.run(['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script],
@@ -277,12 +353,25 @@ class SelectHistory(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(output, f"range={'a' * 40}..{'b' * 40}\n")
 
-    def test_full_history_calls_scan_all_history_on_any_event(self) -> None:
-        for event in ('push', 'schedule', 'pull_request', 'workflow_dispatch'):
+    def test_full_history_calls_scan_all_history_on_other_events(self) -> None:
+        for event in ('push', 'schedule', 'workflow_dispatch'):
             with self.subTest(event=event):
                 result, output = self.select('full', event)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(output, 'range=\n')
+
+    def test_full_pr_selects_default_tip_and_pr_head(self) -> None:
+        result, output = self.select('full', 'pull_request', base='c' * 40, default='present')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(output, rf"^range=\nrevisions=[0-9a-f]{{40}} {'b' * 40}\n$")
+        self.assertNotIn('c' * 40, output)
+
+    def test_full_pr_refuses_a_missing_default_tip_or_invalid_head(self) -> None:
+        for head, default in (('b' * 40, ''), ('HEAD', 'present'), ('', 'present')):
+            result, output = self.select('full', 'pull_request', head=head, default=default)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn('::error::', result.stdout)
+            self.assertEqual(output, '')
 
     def test_pr_mode_requires_a_pr_event(self) -> None:
         for history in ('', 'pr'):

@@ -2,13 +2,21 @@
 # Shared by this action and actions/gitleaks-scan; @see README.md.
 set +e -uo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 1
-# Standalone callers omit the argument and always scan all history.
+# Omitted selections retain all refs; explicit tips select the union of their histories.
 range=${1:-}
+selected=${2:-}
 if [ -n "$range" ] && ! [[ "$range" =~ ^[0-9a-f]{40}\.\.[0-9a-f]{40}$ ]]; then
   echo "::error::invalid range - expected two lowercase 40-character commit SHAs separated by .."; exit 1
 fi
+if [ -n "$selected" ] && ! [[ "$selected" =~ ^[0-9a-f]{40}(\ [0-9a-f]{40})*$ ]]; then
+  echo "::error::invalid revisions - expected space-separated lowercase 40-character commit SHAs"; exit 1
+fi
+if [ -n "$range" ] && [ -n "$selected" ]; then
+  echo "::error::range and revisions are mutually exclusive"; exit 1
+fi
 revisions=(--all)
 [ -z "$range" ] || revisions=("$range")
+[ -z "$selected" ] || read -r -a revisions <<< "$selected"
 if { [ -z "$RCI_IMAGE" ] && [ -z "$RCI_BINARY" ]; } || { [ -n "$RCI_IMAGE" ] && [ -n "$RCI_BINARY" ]; }; then
   echo "::error::exactly one of image or binary must be set - infrastructure, no scan"; exit 1
 fi

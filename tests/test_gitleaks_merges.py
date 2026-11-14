@@ -64,16 +64,16 @@ class RunUnderGitHubBash(unittest.TestCase):
     def run_text(self, text: str, workspace: Path, **env: str) -> subprocess.CompletedProcess:
         base = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         base.update(PATH=f"{self.tmp / 'bin'}:{os.environ['PATH']}", GITHUB_WORKSPACE=str(workspace),
-                    GITHUB_ACTION_PATH=str(self.tmp / "actions" / "gitleaks-merges"), RCI_IMAGE=IMAGE, RCI_BINARY="", RCI_RANGE="", RCI_CONFIG="",
+                    GITHUB_ACTION_PATH=str(self.tmp / "actions" / "gitleaks-merges"), RCI_IMAGE=IMAGE, RCI_BINARY="", RCI_RANGE="", RCI_REVISIONS="", RCI_CONFIG="",
                     FAKE_SCAN_ARGS=str(self.tmp / "scan-args"), FAKE_DOCKER_ARGS=str(self.tmp / "docker-args"),
                     FAKE_GITLEAKS_ARGS=str(self.tmp / "gitleaks-args"),
-                    GIT_OPTIONAL_LOCKS="0")
+                    GIT_OPTIONAL_LOCKS="0", GIT_CEILING_DIRECTORIES=str(self.tmp))
         base.update(env)
         return subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", text], cwd=workspace,
                               env=base, capture_output=True, text=True)
 
     def composite(self) -> str:
-        return 'bash "$GITHUB_ACTION_PATH/run.sh" "$RCI_RANGE"'
+        return 'bash "$GITHUB_ACTION_PATH/run.sh" "$RCI_RANGE" "$RCI_REVISIONS"'
 
     def full_history(self) -> str:
         return step_named(load(ROOT / "actions/gitleaks-scan/action.yml")["runs"]["steps"], "gitleaks (history)")["run"]
