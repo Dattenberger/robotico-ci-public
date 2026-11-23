@@ -40,7 +40,13 @@ Other events using `history: full` retain the all-branch, all-tag scan and check
 The `pr` mode keeps its `base.sha..head.sha` selection and existing fetch behaviour.
 The workflow fetches with plain git rather than `actions/checkout`, whose credential cleanup fails on a gitlink
 that has no `.gitmodules` entry.
-It needs an empty workspace, so it runs only on ephemeral runners (the CI pool, GitHub-hosted).
+It needs an empty workspace, so it runs only on ephemeral runners (the CI pool, GitHub-hosted). A self-hosted
+runner may pre-seed the workspace with a marked checkout of the same repository (a seed) to speed up the fetch: marker
+`.git/ci-seed` naming the repository, refs only under `refs/ci-seed/`, a detached HEAD, `remote.origin.url` at this
+repository and no other config beyond a few core keys, no hooks, alternates, shallow history or links, everything
+owned by the runner user and the working tree clean. The fetch then skips `git init`, fetches as usual against the
+seed's objects and deletes `refs/ci-seed/*` afterwards, so every mode scans exactly the refs and commits of a cold
+run. Anything else in the workspace still fails the job.
 
 To use the composite directly, check out the target repository with `fetch-depth: 0` and
 `persist-credentials: false`, then call `Dattenberger/robotico-ci-public/actions/gitleaks-scan@v1`.
