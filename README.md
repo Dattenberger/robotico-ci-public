@@ -46,7 +46,9 @@ runner may pre-seed the workspace with a marked checkout of the same repository 
 repository and no other config beyond a few core keys, no hooks, alternates, shallow history or links, everything
 owned by the runner user and the working tree clean. The fetch then skips `git init`, fetches as usual against the
 seed's objects and deletes `refs/ci-seed/*` afterwards, so every mode scans exactly the refs and commits of a cold
-run. Anything else in the workspace still fails the job.
+run. Anything else in the workspace still fails the job. A seed is trusted like the runner that leaves it: the
+checks catch leftovers, a wrong repository and config that would run code, not a hostile workspace. Objects the seed
+already holds are not fetched again, so a forged object in a seed would shadow the one on GitHub.
 
 To use the composite directly, check out the target repository with `fetch-depth: 0` and
 `persist-credentials: false`, then call `Dattenberger/robotico-ci-public/actions/gitleaks-scan@v1`.

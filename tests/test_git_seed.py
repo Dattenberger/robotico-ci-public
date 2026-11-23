@@ -6,11 +6,13 @@ harmless finding markers read by the fake scanner.
 @see .github/workflows/secret-scan.yml, tests/test_scan_scope.py
 """
 
+import hashlib
 import os
 import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -28,6 +30,30 @@ REFUSED = '::error::the workspace is not empty and holds no valid seed ('
 def git(cwd: Path, *args: str) -> str:
     return subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '-C', str(cwd), *args], env=GIT_ENV,
                           check=True, capture_output=True, text=True).stdout.strip()
+
+
+def tree_hashes(ws: Path) -> dict:
+    """sha256 of every working tree file outside .git, by relative path."""
+    return {str(f.relative_to(ws)): hashlib.sha256(f.read_bytes()).hexdigest()
+            for f in sorted(ws.rglob('*')) if f.is_file() and '.git' not in f.relative_to(ws).parts}
+
+
+def forge_index_blob(index: Path, path: str, blob: str) -> None:
+    """Point <path>'s entry of a version 2/3 index at <blob>, keeping its stat data, and fix the checksum."""
+    data = bytearray(index.read_bytes())
+    assert data[:4] == b'DIRC' and int.from_bytes(data[4:8], 'big') in (2, 3)
+    pos, hits = 12, 0
+    for _ in range(int.from_bytes(data[8:12], 'big')):
+        extended = int.from_bytes(data[pos + 60:pos + 62], 'big') & 0x4000
+        start = pos + 62 + (2 if extended else 0)
+        end = data.index(b'\0', start)
+        if bytes(data[start:end]) == path.encode():
+            data[pos + 40:pos + 60] = bytes.fromhex(blob)
+            hits += 1
+        pos += (end - pos + 8) & ~7
+    assert hits == 1
+    data[-20:] = hashlib.sha1(data[:-20]).digest()
+    index.write_bytes(bytes(data))
 
 
 class GitSeed(unittest.TestCase):
@@ -69,20 +95,29 @@ class GitSeed(unittest.TestCase):
         git(self.src, 'commit', '-q', '-m', 'remove fixture')
         git(self.src, 'checkout', '-q', 'main')
 
-    def make_seed(self, name: str = 'warm', extra: dict | None = None) -> Path:
-        """A seed of origin's main as the runner leaves it; <extra> adds refs/ci-seed/heads/<n> = <sha> (stale)."""
+    def make_seed(self, name: str = 'warm', extra: dict | None = None, repack: bool = False,
+                  reflog: bool = True) -> Path:
+        """A seed of origin's main as the runner leaves it; <extra> adds refs/ci-seed/heads/<n> = <sha> (stale),
+        <repack> repacks and prunes it as the weekly upkeep does, reflog=False writes no reflogs."""
         ws = self.tmp / name
-        git(self.tmp, 'init', '-q', '--template=', str(ws))
-        git(ws, 'config', 'remote.origin.url', self.url)
-        git(ws, 'config', 'gc.auto', '0')
-        git(ws, 'fetch', '-q', self.url, '+refs/heads/main:refs/ci-seed/heads/main')
+        log = [] if reflog else ['-c', 'core.logAllRefUpdates=false']
+        git(self.tmp, *log, 'init', '-q', '--template=', str(ws))
+
+        def seed_git(*args: str) -> str:
+            return git(ws, *log, *args)
+        seed_git('config', 'remote.origin.url', self.url)
+        seed_git('config', 'gc.auto', '0')
+        seed_git('fetch', '-q', self.url, '+refs/heads/main:refs/ci-seed/heads/main')
         for ref, sha in (extra or {}).items():
-            git(ws, 'fetch', '-q', str(self.src), sha)
-            git(ws, 'update-ref', f'refs/ci-seed/heads/{ref}', sha)
-        head = git(ws, 'rev-parse', 'refs/ci-seed/heads/main')
-        git(ws, 'update-ref', '--no-deref', 'HEAD', head)
-        git(ws, 'reset', '-q', '--hard')
-        git(ws, 'update-index', '-q', '--refresh')
+            seed_git('fetch', '-q', str(self.src), sha)
+            seed_git('update-ref', f'refs/ci-seed/heads/{ref}', sha)
+        head = seed_git('rev-parse', 'refs/ci-seed/heads/main')
+        seed_git('update-ref', '--no-deref', 'HEAD', head)
+        seed_git('reset', '-q', '--hard')
+        seed_git('update-index', '-q', '--refresh')
+        if repack:
+            seed_git('repack', '-q', '-a', '-d')
+            seed_git('prune', '--expire=now')
         (ws / '.git/ci-seed').write_text('v=1\nrepo=owner/repo.git\nrepacked=1700000000\n')
         return ws
 
@@ -131,17 +166,17 @@ class GitSeed(unittest.TestCase):
         return {'refs': git(ws, 'for-each-ref', '--format=%(objectname) %(refname)'),
                 'all': sorted(git(ws, 'rev-list', '--all').split()), 'head': git(ws, 'rev-parse', 'HEAD'),
                 'selected': selected, 'scanned': sorted(scanned.read_text().split()), 'verdicts': verdicts,
-                'status': git(ws, 'status', '--porcelain', '--ignored'),
+                'status': git(ws, 'status', '--porcelain', '--ignored'), 'tree': tree_hashes(ws),
                 'remote': sorted(git(ws, 'config', '--local', '--get-regexp', '^remote\\.').splitlines())}
 
-    def assert_warm_equals_cold(self, extra: dict | None = None, finding: tuple = ()) -> None:
+    def assert_warm_equals_cold(self, extra: dict | None = None, finding: tuple = (), **seed: bool) -> None:
         """Per mode, cold (empty workspace) and warm (seed) runs agree; modes in <finding> fail on a finding."""
         for history, event in MODES:
             with self.subTest(history=history, event=event):
                 tag = f'{history}-{event}'
                 cold = self.tmp / f'cold-{tag}'
                 cold.mkdir()
-                warm = self.make_seed(f'warm-{tag}', extra)
+                warm = self.make_seed(f'warm-{tag}', extra, **seed)
                 env = self.event(history, event)
                 expected = self.run_job(cold, env)
                 self.assertEqual(self.run_job(warm, env), expected)
@@ -160,6 +195,19 @@ class WarmEqualsCold(GitSeed):
 
     def test_a_current_seed_gives_the_cold_refs_revisions_and_verdicts(self) -> None:
         self.assert_warm_equals_cold()
+
+    def test_a_repacked_seed_gives_the_cold_result(self) -> None:
+        """Repack and prune write .git/info/refs and objects/info/packs, which a seed may carry."""
+        self.assert_warm_equals_cold(repack=True)
+        warm = self.tmp / 'warm-full-push'
+        self.assertTrue((warm / '.git/info/refs').is_file())
+        self.assertTrue((warm / '.git/objects/info/packs').is_file())
+
+    def test_a_seed_without_reflogs_gives_the_cold_result(self) -> None:
+        stale = {'old': git(self.src, 'rev-parse', 'main')}
+        self.commit('b.txt', 'b\n')
+        self.push()
+        self.assert_warm_equals_cold(extra=stale, reflog=False)
 
     def test_a_stale_seed_fetches_what_the_target_added(self) -> None:
         """The seed predates the new main commits and a finding on the PR branch; both reach the scan."""
@@ -331,14 +379,52 @@ class SeedShape(GitSeed):
                 ws = self.make_seed(f'flag-{n}')
                 git(ws, 'update-index', flag, 'a.txt')
                 (ws / 'a.txt').write_text('hidden\n')
-                self.assert_refused(ws, 'index flags')
+                self.assertEqual(git(ws, 'status', '--porcelain'), '')
+                self.assert_refused(ws, 'files beside the seed or changed')
+
+    def test_forged_index_stat_data_is_refused(self) -> None:
+        """A replaced tree file whose index entry keeps HEAD's blob but carries the new file's stat data."""
+        ws = self.make_seed('forged-index')
+        blob = git(ws, 'rev-parse', 'HEAD:a.txt')
+        (ws / 'a.txt').write_text('forged\n')
+        past = time.time() - 1000
+        os.utime(ws / 'a.txt', (past, past))
+        git(ws, 'update-index', 'a.txt')
+        forge_index_blob(ws / '.git/index', 'a.txt', blob)
+        # The control: the forgery hides the change from status over the seed's own index.
+        self.assertEqual(git(ws, 'status', '--porcelain'), '')
+        self.assert_refused(ws, 'files beside the seed or changed')
+
+    def test_a_commit_graph_or_multi_pack_index_is_refused(self) -> None:
+        for n, (command, path) in enumerate(((('commit-graph', 'write', '--reachable'), 'info/commit-graph'),
+                                             (('commit-graph', 'write', '--reachable', '--split'),
+                                              'info/commit-graphs'),
+                                             (('multi-pack-index', 'write'), 'pack/multi-pack-index'))):
+            with self.subTest(path=path):
+                ws = self.make_seed(f'graph-{n}', repack=True)
+                git(ws, *command)
+                self.assertTrue((ws / '.git/objects' / path).exists())
+                self.assert_refused(ws, 'unexpected entry in .git/objects')
+
+    @unittest.skipIf(os.geteuid() == 0, 'root reads every directory')
+    def test_an_unreadable_directory_beside_the_seed_is_refused_without_its_name_in_the_log(self) -> None:
+        ws = self.make_seed('unreadable')
+        hidden = ws / 'hidden-leftover-name'
+        hidden.mkdir()
+        hidden.chmod(0)
+        self.addCleanup(hidden.chmod, 0o755)
+        result = self.fetch(ws)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f'{REFUSED}unreadable entry in the workspace)', result.stdout)
+        self.assertNotIn('hidden-leftover-name', result.stdout + result.stderr)
 
     def test_a_seed_owned_by_another_user_is_refused(self) -> None:
         """A fake id makes the runner another uid than the files' owner, without root or user namespaces."""
         fakebin = self.tmp / 'fakebin'
         fakebin.mkdir()
         fake_id = fakebin / 'id'
-        fake_id.write_text(f'#!/bin/sh\n[ "$1" = -u ] && {{ echo {os.getuid() + 1}; exit 0; }}\nexec /usr/bin/id "$@"\n')
+        fake_id.write_text(f'#!/bin/sh\n[ "$1" = -u ] && {{ echo {os.getuid() + 1}; exit 0; }}\n'
+                           'exec /usr/bin/id "$@"\n')
         fake_id.chmod(0o755)
         ws = self.make_seed('foreign-owner')
         self.assert_refused(ws, 'not owned by the runner user', PATH=f"{fakebin}:{os.environ['PATH']}")

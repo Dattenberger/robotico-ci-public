@@ -131,8 +131,9 @@ class WorkflowShape(unittest.TestCase):
         self.assertEqual(doc['permissions'], {'contents': 'read'})
         self.assertEqual(set(doc['jobs']), {'gitleaks'})
         job = doc['jobs']['gitleaks']
-        self.assertEqual(set(job), {'runs-on', 'steps'})
+        self.assertEqual(set(job), {'runs-on', 'timeout-minutes', 'steps'})
         self.assertEqual(job['runs-on'], RUNNER)
+        self.assertEqual(job['timeout-minutes'], 30)
 
     def test_fetch_takes_inputs_from_env_and_scan_uses_the_public_remote_action(self) -> None:
         fetch, select, scan = load(ROOT / '.github/workflows/secret-scan.yml')['jobs']['gitleaks']['steps']
